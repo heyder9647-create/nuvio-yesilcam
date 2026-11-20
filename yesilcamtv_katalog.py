@@ -2,7 +2,7 @@
 import argparse, json, os, re, sys, time, html
 from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 from urllib.request import Request, urlopen
 
 UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36"
@@ -59,14 +59,18 @@ def meta_tag(body, prop):
     return html.unescape(m.group(1)).strip() if m else None
 
 
+def clean_title(t):
+    t = html.unescape(t or "").strip()
+    t = re.sub(r"\s*\|\s*YESILCAM TV\s*$", "", t, flags=re.I)
+    t = re.sub(r"\s*\((?:19|20)\d{2}\)\s*$", "", t)
+    t = re.sub(r"\s+(?:full\s+)?(?:hd\s+)?izle\s*$", "", t, flags=re.I)
+    return t.strip(" -–|")
+
+
 def parse_film(url, body):
     vid = re.search(r"Video name\s*:\s*([^\[<|]*?)\s*\[(\d+)\]", body)
-    title = vid.group(1).strip() if vid else None
     tmdb = vid.group(2) if vid else None
-    og_title = meta_tag(body, "og:title")
-    if og_title:
-        og_title = re.sub(r"\s*\|\s*YESILCAM TV\s*$", "", og_title, flags=re.I)
-    title = html.unescape(title or og_title or "").strip()
+    title = clean_title(vid.group(1) if vid else meta_tag(body, "og:title"))
 
     poster = meta_tag(body, "og:image")
     if not poster:
@@ -79,36 +83,66 @@ def parse_film(url, body):
     imdb = re.search(r"IMDb:\s*([\d.]+)", body)
     genres = [html.unescape(g) for g in re.findall(r'/category/[^"\']+["\']\s+title=["\']([^"\']+)["\']', body)]
     desc = meta_tag(body, "og:description") or meta_tag(body, "description")
-
-    return {
-        "url": url, "name": title, "tmdb": tmdb, "poster": poster,
-        "year": year.group(1) if year else None,
-        "imdbRating": imdb.group(1) if imdb else None,
-        "genres": genres, "description": desc,
-    }
+    return {"url": url, "name": title, "tmdb": tmdb, "poster": poster,
+            "year": year.group(1) if year else None,
+            "imdbRating": imdb.group(1) if imdb else None,
+            "genres": genres, "description": desc}
 
 
-def tmdb_to_imdb(tmdb_id, key):
-    body = fetch(f"https://api.themoviedb.org/3/movie/{tmdb_id}/external_ids?api_key={key}")
-    if not body:
-        return None
+def tmdb_get(base, key, path, **params):
+    q = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
+    body = fetch(f"{base}{path}?api_key={key}&{q}")
     try:
-        return json.loads(body).get("imdb_id") or None
+        return json.loads(body) if body else None
     except ValueError:
         return None
+
+
+def search_tmdb(film, key, base):
+    title, year = film["name"], film["year"]
+    if not title or not year:
+        return None
+    y = int(year)
+    seen = {}
+    for lang in ("tr-TR", "en-US"):
+        for extra in ({"year": year}, {}):
+            d = tmdb_get(base, key, "/search/movie", query=title, language=lang,
+                         include_adult="false", **extra)
+            for r in (d or {}).get("results", []):
+                seen.setdefault(r["id"], r)
+            ok = [r for r in seen.values()
+                  if (r.get("release_date") or "")[:4].isdigit()
+                  and abs(int(r["release_date"][:4]) - y) <= 1]
+            if ok:
+                ok.sort(key=lambda r: (r.get("original_language") != "tr",
+                                       abs(int(r["release_date"][:4]) - y),
+                                       -(r.get("popularity") or 0)))
+                return str(ok[0]["id"])
+    return None
+
+
+def tmdb_to_imdb(tmdb_id, key, base):
+    d = tmdb_get(base, key, f"/movie/{tmdb_id}/external_ids")
+    return (d or {}).get("imdb_id") or None
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="https://yesilcamtv.com.tr")
     ap.add_argument("--out", default="docs")
-    ap.add_argument("--tmdb-key", default=None)
+    ap.add_argument("--tmdb-key", default=os.environ.get("TMDB_KEY"))
+    ap.add_argument("--tmdb-base", default="https://api.themoviedb.org/3")
+    ap.add_argument("--imdb-ids", action="store_true")
     ap.add_argument("--workers", type=int, default=6)
     a = ap.parse_args()
     base = a.base.rstrip("/")
+    key = (a.tmdb_key or "").strip() or None
 
-    cache_path = "cache.json"
+    cache_path, tmdb_path = "cache.json", "tmdb_cache.json"
     cache = json.load(open(cache_path, encoding="utf-8")) if os.path.exists(cache_path) else {}
+    tcache = json.load(open(tmdb_path, encoding="utf-8")) if os.path.exists(tmdb_path) else {}
+    for f in cache.values():
+        f["name"] = clean_title(f.get("name"))
 
     links = crawl_listing(base)
     todo = [u for u in links if u not in cache]
@@ -127,18 +161,37 @@ def main():
                 print(f"  film {i}/{len(todo)}")
     json.dump(cache, open(cache_path, "w", encoding="utf-8"), ensure_ascii=False)
 
+    need = [cache[u] for u in links if cache.get(u) and not cache[u]["tmdb"]
+            and cache[u]["url"] not in tcache]
+    if need and key:
+        print(f"{len(need)} film icin TMDB'de arama yapiliyor")
+
+        def look(f):
+            return f["url"], search_tmdb(f, key, a.tmdb_base)
+
+        with ThreadPoolExecutor(a.workers) as ex:
+            for i, (u, tid) in enumerate(ex.map(look, need), 1):
+                tcache[u] = tid
+                if i % 100 == 0:
+                    json.dump(tcache, open(tmdb_path, "w", encoding="utf-8"), ensure_ascii=False)
+                    print(f"  arama {i}/{len(need)}")
+        json.dump(tcache, open(tmdb_path, "w", encoding="utf-8"), ensure_ascii=False)
+    elif need:
+        print("UYARI: TMDB anahtari yok, ID'siz filmler atlanacak (TMDB_KEY ekleyin)")
+
     metas, skipped = [], []
     for u in links:
         f = cache.get(u)
         if not f:
             skipped.append((u, "sayfa alinamadi")); continue
-        if not f["tmdb"]:
-            skipped.append((u, "sayfada TMDB ID yok")); continue
+        tid = f["tmdb"] or tcache.get(u)
+        if not tid:
+            skipped.append((u, "TMDB'de eslesme yok" if key else "sayfada TMDB ID yok ve anahtar yok")); continue
         if not f["poster"]:
             skipped.append((u, "sitede poster yok")); continue
-        mid = f"tmdb:{f['tmdb']}"
-        if a.tmdb_key:
-            mid = tmdb_to_imdb(f["tmdb"], a.tmdb_key) or mid
+        mid = f"tmdb:{tid}"
+        if key and a.imdb_ids:
+            mid = tmdb_to_imdb(tid, key, a.tmdb_base) or mid
         m = {"id": mid, "type": "movie", "name": f["name"], "poster": f["poster"],
              "posterShape": "poster"}
         if f["year"]: m["releaseInfo"] = f["year"]
@@ -165,7 +218,7 @@ def main():
         json.dump({"metas": chunk}, open(path, "w", encoding="utf-8"), ensure_ascii=False)
 
     manifest = {
-        "id": ADDON_ID, "version": "1.0.0", "name": "Yeşilçam.tv",
+        "id": ADDON_ID, "version": "1.1.0", "name": "Yeşilçam.tv",
         "description": "yesilcamtv.com.tr sitesindeki tüm filmler (kapaklar sitenin kendisinden)",
         "resources": ["catalog"], "types": ["movie"], "idPrefixes": ["tmdb:", "tt"],
         "catalogs": [{"type": "movie", "id": CATALOG_ID, "name": "Yeşilçam.tv"}],
@@ -173,9 +226,8 @@ def main():
     json.dump(manifest, open(os.path.join(a.out, "manifest.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
 
-    if skipped:
-        with open("atlananlar.txt", "w", encoding="utf-8") as fh:
-            fh.write("\n".join(f"{u}\t{why}" for u, why in skipped))
+    with open("atlananlar.txt", "w", encoding="utf-8") as fh:
+        fh.write("\n".join(f"{u}\t{why}" for u, why in skipped))
     print(f"\nBitti: {len(metas)} film kataloga yazildi, {len(skipped)} atlandi")
 
 
