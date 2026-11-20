@@ -1,0 +1,23 @@
+{
+  "id": "tr.yesilcamtv.katalog",
+  "version": "1.0.0",
+  "name": "Yeşilçam.tv",
+  "description": "yesilcamtv.com.tr sitesindeki tüm filmler (kapaklar sitenin kendisinden)",
+  "resources": [
+    "catalog"
+  ],
+  "types": [
+    "movie"
+  ],
+  "idPrefixes": [
+    "tmdb:",
+    "tt"
+  ],
+  "catalogs": [
+    {
+      "type": "movie",
+      "id": "yesilcamtv",
+      "name": "Yeşilçam.tv"
+    }
+  ]
+}
