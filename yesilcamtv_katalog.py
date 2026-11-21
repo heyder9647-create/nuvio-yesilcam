@@ -9,6 +9,20 @@ UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124 Mobile Safar
 ADDON_ID = "tr.yesilcamtv.katalog"
 CATALOG_ID = "yesilcamtv"
 PAGE_SIZE = 100
+MIN_TUR_FILM = 3      # bundan az filmi olan tur katalog olmaz
+GURULTU_ORANI = 0.95  # filmlerin %95'inde gorunen "tur" menu gurultusudur, atlanir
+
+_TR = str.maketrans("çğıöşüÇĞİÖŞÜâîûÂÎÛ", "cgiosuCGIOSUaiuAIU")
+
+
+def slugify(t):
+    t = t.translate(_TR).lower()
+    return re.sub(r"[^a-z0-9]+", "-", t).strip("-") or "diger"
+
+
+def yil_sirasi(m):
+    y = m.get("releaseInfo") or ""
+    return (-(int(y) if y.isdigit() else 0), (m.get("name") or "").lower())
 
 
 def fetch(url, tries=4):
@@ -206,22 +220,48 @@ def main():
             seen.add(m["id"]); uniq.append(m)
     metas = uniq
 
+    # yeniden eskiye (yil azalan)
+    metas.sort(key=yil_sirasi)
+
+    # turleri say, menu gurultusunu ele
+    sayac = {}
+    for m in metas:
+        for g in set(m.get("genres") or []):
+            sayac[g] = sayac.get(g, 0) + 1
+    toplam = len(metas) or 1
+    turler = [(g, n) for g, n in sayac.items()
+              if n >= MIN_TUR_FILM and n / toplam < GURULTU_ORANI]
+    turler.sort(key=lambda x: -x[1])
+    print("\nTur dagilimi:")
+    for g, n in sorted(sayac.items(), key=lambda x: -x[1]):
+        durum = "ATLANDI" if (g, n) not in turler else "katalog"
+        print(f"  {g}: {n} ({durum})")
+
     cat_dir = os.path.join(a.out, "catalog", "movie")
     os.makedirs(cat_dir, exist_ok=True)
-    pages = [metas[i:i + PAGE_SIZE] for i in range(0, len(metas), PAGE_SIZE)] or [[]]
-    for n, chunk in enumerate(pages):
-        if n == 0:
-            path = os.path.join(cat_dir, f"{CATALOG_ID}.json")
-        else:
-            os.makedirs(os.path.join(cat_dir, CATALOG_ID), exist_ok=True)
-            path = os.path.join(cat_dir, CATALOG_ID, f"skip={n * PAGE_SIZE}.json")
-        json.dump({"metas": chunk}, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+
+    def yaz_katalog(cat_id, items):
+        pages = [items[i:i + PAGE_SIZE] for i in range(0, len(items), PAGE_SIZE)] or [[]]
+        for n, chunk in enumerate(pages):
+            if n == 0:
+                path = os.path.join(cat_dir, f"{cat_id}.json")
+            else:
+                os.makedirs(os.path.join(cat_dir, cat_id), exist_ok=True)
+                path = os.path.join(cat_dir, cat_id, f"skip={n * PAGE_SIZE}.json")
+            json.dump({"metas": chunk}, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+
+    catalogs = [{"type": "movie", "id": CATALOG_ID, "name": "Yeşilçam.tv"}]
+    yaz_katalog(CATALOG_ID, metas)
+    for g, n in turler:
+        cid = f"{CATALOG_ID}-{slugify(g)}"
+        yaz_katalog(cid, [m for m in metas if g in (m.get("genres") or [])])
+        catalogs.append({"type": "movie", "id": cid, "name": g})
 
     manifest = {
-        "id": ADDON_ID, "version": "1.1.0", "name": "Yeşilçam.tv",
+        "id": ADDON_ID, "version": "1.2.0", "name": "Yeşilçam.tv",
         "description": "yesilcamtv.com.tr sitesindeki tüm filmler (kapaklar sitenin kendisinden)",
         "resources": ["catalog"], "types": ["movie"], "idPrefixes": ["tmdb:", "tt"],
-        "catalogs": [{"type": "movie", "id": CATALOG_ID, "name": "Yeşilçam.tv"}],
+        "catalogs": catalogs,
     }
     json.dump(manifest, open(os.path.join(a.out, "manifest.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
