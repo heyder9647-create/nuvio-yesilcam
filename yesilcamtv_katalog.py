@@ -97,7 +97,9 @@ def parse_film(url, body):
     imdb = re.search(r"IMDb:\s*([\d.]+)", body)
     genres = [html.unescape(g) for g in re.findall(r'/category/[^"\']+["\']\s+title=["\']([^"\']+)["\']', body)]
     desc = meta_tag(body, "og:description") or meta_tag(body, "description")
+    rb = re.search(r"rumble\.com\\?/embed\\?/([a-z0-9]+)", body, re.I)
     return {"url": url, "name": title, "tmdb": tmdb, "poster": poster,
+            "rumble": rb.group(1) if rb else None,
             "year": year.group(1) if year else None,
             "imdbRating": imdb.group(1) if imdb else None,
             "genres": genres, "description": desc}
@@ -159,7 +161,7 @@ def main():
         f["name"] = clean_title(f.get("name"))
 
     links = crawl_listing(base)
-    todo = [u for u in links if u not in cache]
+    todo = [u for u in links if u not in cache or "rumble" not in cache[u]]
     print(f"{len(links)} film bulundu, {len(todo)} tanesi cekilecek")
 
     def work(u):
@@ -193,7 +195,7 @@ def main():
     elif need:
         print("UYARI: TMDB anahtari yok, ID'siz filmler atlanacak (TMDB_KEY ekleyin)")
 
-    metas, skipped = [], []
+    metas, skipped, index = [], [], {}
     for u in links:
         f = cache.get(u)
         if not f:
@@ -201,6 +203,13 @@ def main():
         tid = f["tmdb"] or tcache.get(u)
         if not tid:
             skipped.append((u, "TMDB'de eslesme yok" if key else "sayfada TMDB ID yok ve anahtar yok")); continue
+        # scraper icin: TMDB ID -> Rumble ID (yoksa film sayfasi)
+        ent = {"n": f["name"]}
+        if f.get("rumble"):
+            ent["r"] = f["rumble"]
+        else:
+            ent["u"] = u
+        index[str(tid)] = ent
         if not f["poster"]:
             skipped.append((u, "sitede poster yok")); continue
         mid = f"tmdb:{tid}"
@@ -265,6 +274,10 @@ def main():
     }
     json.dump(manifest, open(os.path.join(a.out, "manifest.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
+
+    with open(os.path.join(a.out, "index.json"), "w", encoding="utf-8") as fh:
+        json.dump(index, fh, ensure_ascii=False, separators=(",", ":"))
+    print(f"index.json: {len(index)} film ({sum(1 for e in index.values() if 'r' in e)} tanesinde Rumble ID var)")
 
     with open("atlananlar.txt", "w", encoding="utf-8") as fh:
         fh.write("\n".join(f"{u}\t{why}" for u, why in skipped))
