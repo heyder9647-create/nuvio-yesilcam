@@ -1,5 +1,6 @@
 var TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
 var BASE = "https://yesilcamtv.com.tr";
+var INDEX_URL = "https://heyder9647-create.github.io/nuvio-yesilcam/index.json";
 var UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36";
 var REQ_TIMEOUT = 8000;
 
@@ -11,7 +12,6 @@ function norm(s) {
     .replace(/&[^;]+;/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-// Her istek en fazla ms sure bekler; takilirsa hata verip bosa duser.
 function withTimeout(p, ms) {
   return new Promise(function (resolve, reject) {
     var done = false;
@@ -31,13 +31,13 @@ function withTimeout(p, ms) {
   });
 }
 
-function getJson(url) {
+function getJson(url, ms) {
   return withTimeout(
     fetch(url, { headers: { "User-Agent": UA } }).then(function (r) {
       if (!r.ok) throw new Error("http " + r.status);
       return r.json();
     }),
-    REQ_TIMEOUT
+    ms || REQ_TIMEOUT
   );
 }
 
@@ -51,6 +51,56 @@ function getText(url) {
   );
 }
 
+// ---- Indeks: TMDB ID -> Rumble ID (katalog scripti uretir) ----
+// Bir kez cekilir, bellekte tutulur. Cekilemezse null doner ve sonraki istekte tekrar denenir.
+var indexPromise = null;
+function loadIndex() {
+  if (!indexPromise) {
+    indexPromise = getJson(INDEX_URL, 6000).catch(function () {
+      indexPromise = null;
+      return null;
+    });
+  }
+  return indexPromise;
+}
+// Modul yuklenir yuklenmez isitma turu: ilk filmde bekleme olmasin.
+try { loadIndex(); } catch (e) {}
+
+function rumbleId(html) {
+  var m = (html || "").match(/rumble\.com\\?\/embed\\?\/([a-z0-9]+)/i);
+  return m ? m[1] : null;
+}
+
+function rumbleStreams(vid, label) {
+  return getText("https://rumble.com/embed/" + vid + "/").then(function (html) {
+    var out = [];
+    var hls = html.match(/"hls":\{"auto":\{"url":"([^"]+)"/);
+    if (hls) {
+      out.push({
+        name: "Yeşilçam TV",
+        title: label + " - Türkçe - HLS",
+        url: hls[1].replace(/\\\//g, "/"),
+        quality: "Auto",
+        headers: { "Referer": "https://rumble.com/", "User-Agent": UA }
+      });
+    }
+    return out;
+  });
+}
+
+function fromEntry(e) {
+  var label = e.n || "Yeşilçam";
+  if (e.r) return rumbleStreams(e.r, label);
+  if (e.u) {
+    return getText(e.u).then(function (h) {
+      var v = rumbleId(h);
+      return v ? rumbleStreams(v, label) : [];
+    });
+  }
+  return Promise.resolve([]);
+}
+
+// ---- Yedek: indeks hic cekilemezse eski yontem (site aramasi) ----
 function tmdbTitles(id) {
   var u = "https://api.themoviedb.org/3/movie/" + id + "?api_key=" + TMDB_API_KEY + "&language=tr-TR";
   return getJson(u).then(function (d) {
@@ -67,7 +117,6 @@ function searchSite(q) {
   return getJson(u).catch(function () { return []; });
 }
 
-// Tum basliklari ayni anda arar (art arda degil), sonuclari birlestirir.
 function searchAll(titles) {
   return Promise.all(titles.map(searchSite)).then(function (lists) {
     var seen = {};
@@ -92,45 +141,32 @@ function pickPost(posts, titles) {
   return part[0] || null;
 }
 
-function rumbleId(html) {
-  var m = (html || "").match(/rumble\.com\/embed\/([a-z0-9]+)/i);
-  return m ? m[1] : null;
-}
-
-function rumbleStreams(vid, label) {
-  return getText("https://rumble.com/embed/" + vid + "/").then(function (html) {
-    var out = [];
-    var hls = html.match(/"hls":\{"auto":\{"url":"([^"]+)"/);
-    if (hls) {
-      out.push({
-        name: "Yeşilçam TV",
-        title: label + " - Türkçe - HLS",
-        url: hls[1].replace(/\\\//g, "/"),
-        quality: "Auto",
-        headers: { "Referer": "https://rumble.com/", "User-Agent": UA }
+function legacy(tmdbId) {
+  return tmdbTitles(tmdbId).then(function (titles) {
+    if (!titles.length) return [];
+    return searchAll(titles).then(function (posts) {
+      var post = pickPost(posts, titles);
+      if (!post) return [];
+      var label = post.title.rendered;
+      var vid = rumbleId(post.content && post.content.rendered);
+      if (vid) return rumbleStreams(vid, label);
+      return getText(post.link).then(function (h) {
+        var v = rumbleId(h);
+        return v ? rumbleStreams(v, label) : [];
       });
-    }
-    return out;
+    });
   });
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
   if (mediaType !== "movie") return Promise.resolve([]);
-  return tmdbTitles(tmdbId)
-    .then(function (titles) {
-      if (!titles.length) return [];
-      return searchAll(titles).then(function (posts) {
-        var post = pickPost(posts, titles);
-        if (!post) return [];
-        var label = post.title.rendered;
-        var vid = rumbleId(post.content && post.content.rendered);
-        if (vid) return rumbleStreams(vid, label);
-        // yedek: icerikte yoksa film sayfasina bak
-        return getText(post.link).then(function (h) {
-          var v = rumbleId(h);
-          return v ? rumbleStreams(v, label) : [];
-        });
-      });
+  return loadIndex()
+    .then(function (idx) {
+      // Indeks yoksa (cekilemedi) eski yonteme dus.
+      if (!idx) return legacy(tmdbId);
+      // Indeks var ama film yoksa: sitede yok, bosuna arama yapma.
+      var e = idx[String(tmdbId)];
+      return e ? fromEntry(e) : [];
     })
     .catch(function () { return []; });
 }
