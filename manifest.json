@@ -1,19 +1,25 @@
 {
   "name": "Yeşilçam TV Repo",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "scrapers": [
     {
       "id": "yesilcamtv",
       "name": "Yeşilçam TV",
       "description": "yesilcamtv.com.tr Yeşilçam filmleri (Rumble HLS)",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "heyder",
-      "supportedTypes": ["movie"],
+      "supportedTypes": [
+        "movie"
+      ],
       "filename": "providers/yesilcamtv.js",
       "enabled": true,
       "logo": "https://www.google.com/s2/favicons?domain=yesilcamtv.com.tr&sz=128",
-      "contentLanguage": ["tr"],
-      "formats": ["m3u8"]
+      "contentLanguage": [
+        "tr"
+      ],
+      "formats": [
+        "m3u8"
+      ]
     }
   ]
 }
