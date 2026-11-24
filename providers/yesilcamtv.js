@@ -56,15 +56,13 @@ function getText(url) {
 var indexPromise = null;
 function loadIndex() {
   if (!indexPromise) {
-    indexPromise = getJson(INDEX_URL, 6000).catch(function () {
+    indexPromise = getJson(INDEX_URL, 4000).catch(function () {
       indexPromise = null;
       return null;
     });
   }
   return indexPromise;
 }
-// Modul yuklenir yuklenmez isitma turu: ilk filmde bekleme olmasin.
-try { loadIndex(); } catch (e) {}
 
 function rumbleId(html) {
   var m = (html || "").match(/rumble\.com\\?\/embed\\?\/([a-z0-9]+)/i);
@@ -158,17 +156,29 @@ function legacy(tmdbId) {
   });
 }
 
+// Verilen islerden ilk DOLU sonucu doner; hepsi bos/hatali biterse [] doner.
+function firstNonEmpty(list) {
+  return new Promise(function (resolve) {
+    var pending = list.length;
+    function fail() { pending--; if (pending <= 0) resolve([]); }
+    list.forEach(function (p) {
+      p.then(function (v) {
+        if (v && v.length) resolve(v); else fail();
+      }, fail);
+    });
+  });
+}
+
 function getStreams(tmdbId, mediaType, season, episode) {
   if (mediaType !== "movie") return Promise.resolve([]);
-  return loadIndex()
-    .then(function (idx) {
-      // Indeks yoksa (cekilemedi) eski yonteme dus.
-      if (!idx) return legacy(tmdbId);
-      // Indeks var ama film yoksa: sitede yok, bosuna arama yapma.
-      var e = idx[String(tmdbId)];
-      return e ? fromEntry(e) : [];
-    })
-    .catch(function () { return []; });
+  // Iki yol ayni anda baslar, hangisi once sonuc verirse o kullanilir.
+  // Indeks yavas/ulasilamaz olsa bile eski yontem bekletilmez.
+  var viaIndex = loadIndex().then(function (idx) {
+    var e = idx && idx[String(tmdbId)];
+    return e ? fromEntry(e) : [];
+  });
+  var viaSearch = legacy(tmdbId);
+  return firstNonEmpty([viaIndex, viaSearch]);
 }
 
 module.exports = { getStreams: getStreams };
